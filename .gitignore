@@ -3,6 +3,7 @@
 *.png
 *.tsv
 *.txt
+!requirements.txt
 *.pyc
 misc/
 figures/
