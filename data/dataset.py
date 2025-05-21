@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import tqdm
 import json
+import os
 import pandas as pd
 
 from collections import defaultdict
@@ -75,8 +76,11 @@ class MEGDataset(torch.utils.data.Dataset):
         self.dataset = dataset
 
         if self.dataset == "libribrain":
-            with open("./data/libribrain_sensor_xyz.json") as f:
-                self.sensor_xyz = np.array(json.load(f))
+            if os.path.exists("./data/libribrain_sensor_xyz.json"):
+                with open("./data/libribrain_sensor_xyz.json") as f:
+                    self.sensor_xyz = np.array(json.load(f))
+            else:
+                self.sensor_xyz = None
         elif self.dataset == "broderick2018":
             self.sensor_xyz = pd.read_csv('./data/broderick2018_sensor_xyz.csv', header=None).to_numpy()
         
