@@ -3,7 +3,7 @@ This repository contains the code for the paper "Unlocking Non-Invasive Brain-to
 ```
 @article{jayalath2024unlocking,
   title={{Unlocking Non-Invasive Brain-to-Text}},
-  author={Jayalath, Dulhan and Landau, Gilad and Jones, Oiwi Parker},
+  author={Jayalath, Dulhan and Landau, Gilad and Parker Jones, Oiwi},
   journal={arXiv preprint arXiv:2505.13446},
   year={2025}
 }
