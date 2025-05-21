@@ -1,0 +1,12 @@
+*.csv
+!broderick2018_sensor_xyz.csv
+*.png
+*.tsv
+*.txt
+*.pyc
+misc/
+figures/
+plots/
+results/
+.DS_Store
+__pycache__/
