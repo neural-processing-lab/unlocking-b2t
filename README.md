@@ -42,3 +42,4 @@ Joint training: `python train.py --vocab_size 250 --dset gwilliams2022 --aux_dse
 - Use `--limit_eval_samples <int>` to reduce the number of sentences you evaluate with to save API costs.
 - Use a trained word predictor for evaluation by supplying `---test_ckpt /path/to/ckpt` (checkpoints are saved to `./checkpoints/*` automatically).
 - Use `--name <run-name>` to change the name of the run logged to weights and biases.
+- Use `--predict_oov` if you want to train and use an OOV position predictor during evaluation.
