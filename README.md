@@ -1,5 +1,5 @@
 # Unlocking Non-Invasive Brain-to-Text
-This repository contains the code for the preprint "Unlocking Non-Invasive Brain-to-Text". Find the preprint on ArXiV [here](https://arxiv.org/abs/2505.13446). If you find this code helpful in your work, please cite the paper:
+This repository contains the code for the paper "Unlocking Non-Invasive Brain-to-Text". Find the preprint on ArXiv [here](https://arxiv.org/abs/2505.13446). If you find this code helpful in your work, please cite the paper:
 ```
 @article{jayalath2024unlocking,
   title={{Unlocking Non-Invasive Brain-to-Text}},
