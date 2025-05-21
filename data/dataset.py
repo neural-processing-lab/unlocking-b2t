@@ -80,7 +80,7 @@ class MEGDataset(torch.utils.data.Dataset):
                 with open("./data/libribrain_sensor_xyz.json") as f:
                     self.sensor_xyz = np.array(json.load(f))
             else:
-                self.sensor_xyz = None
+                self.sensor_xyz = np.zeros((306, 3), dtype=np.float32)
         elif self.dataset == "broderick2018":
             self.sensor_xyz = pd.read_csv('./data/broderick2018_sensor_xyz.csv', header=None).to_numpy()
         

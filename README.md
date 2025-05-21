@@ -15,7 +15,7 @@ This repository contains the code for the paper "Unlocking Non-Invasive Brain-to
 3. Modify the paths in `data/dataset_configs.yaml` to point `root` to your dataset's BIDS root directory, and change `cache` to where you would like preprocessed data to be kept.
 4. Make sure you have a [weights and biases](http://wandb.ai/) account and are signed in on your console.
 
-> Note: although we use sensor position data for LibriBrain in our experiments, this is not currently publicly released. To train with LibriBrain without this data, you must provide `--har_type gating`. This uses dataset-conditional linear convolutions rather than a spatial attention module. Performance should be similar.
+> Note: although we use sensor position data for LibriBrain in our experiments, this is not currently publicly released. To train with LibriBrain without this data, you must provide `--har_type gating` otherwise training will silently fail. This uses dataset-conditional linear convolutions rather than a spatial attention module. Performance should be similar.
 
 ## Training a model
 All results during training and evaluation will be logged to a project called `word-to-sent` in your weights and biases account.
