@@ -1,5 +1,5 @@
 import torch
-from transformers import T5EncoderModel, T5Tokenizer, AutoModelForCausalLM, AutoTokenizer
+from transformers import T5EncoderModel, T5Tokenizer
 
 def generate_word_embeddings(vocab, dataset, vocab_size, layer=12):
 

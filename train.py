@@ -76,7 +76,7 @@ def cli_main():
         num_samples = min(args.limit_eval_samples, len(datasets["test"]))
         if num_samples < args.limit_eval_samples:
             print(f"Warning: Fewer eval samples {num_samples} than requested limit {args.limit_eval_samples}")
-        random_sampler = torch.utils.data.RandomSampler(datasets["test"], num_samples=num_samples, generator=generator) 
+        random_sampler = torch.utils.data.RandomSampler(datasets["test"], num_samples=nm_samples, generator=generator) 
         test_loader = DataLoader(
             datasets["test"],
             batch_size=args.batch_size,
