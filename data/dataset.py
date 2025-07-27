@@ -9,6 +9,7 @@ import os
 import pandas as pd
 
 from collections import defaultdict
+from transformers import T5Tokenizer
 
 from data.preprocess import preprocess
 from data import utils
@@ -74,6 +75,7 @@ class MEGDataset(torch.utils.data.Dataset):
         self.tmin = tmin
         self.tmax = tmax
         self.dataset = dataset
+        self.tokenizer = T5Tokenizer.from_pretrained('t5-large')
 
         if self.dataset == "libribrain":
             if os.path.exists("./data/libribrain_sensor_xyz.json"):
@@ -220,10 +222,15 @@ class MEGDataset(torch.utils.data.Dataset):
                 words.append(-1)
         words = np.array(words)
 
+        # Tokenize the words using T5 tokenizer
+        text = " ".join(sample.chunk["words"]).lower()
+        words_tokenized = np.array(self.tokenizer.encode(text, add_special_tokens=False))
+
         return {
             "meg": meg,
             "words": words,
             "words_raw": sample.chunk["words"],
+            "words_tokenized": words_tokenized,
             "subject_id": subject_id + self.subject_id_shift,
             "sensor_xyz": sensor_xyz,
             "dataset_id": self.dataset_id,
