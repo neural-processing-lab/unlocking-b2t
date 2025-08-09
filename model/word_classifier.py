@@ -36,6 +36,31 @@ nltk.download('wordnet')
 nltk.download('omw-1.4')
 nltk.download('averaged_perceptron_tagger_eng') # For g2p_en
 
+def top_n_word_error_rate(reference, candidates):
+    """
+    Calculate top-n word accuracy rate.
+    
+    Args:
+        reference: string with space-separated words
+        candidates: list of n candidate strings
+    
+    Returns:
+        float: WER as 1 - hits/total_words
+    """
+    ref_words = reference.split()
+    candidate_words = [candidate.split() for candidate in candidates]
+    
+    hits = 0
+    total_words = len(ref_words)
+    
+    for pos in range(total_words):
+        ref_word = ref_words[pos]
+        # Check if ANY candidate has the correct word at this position
+        if any(candidate_words[i][pos] == ref_word for i in range(len(candidates))):
+            hits += 1
+    
+    return 1 - hits / total_words
+
 
 class WordClassifier(L.LightningModule):
     def __init__(
@@ -60,6 +85,9 @@ class WordClassifier(L.LightningModule):
         self.embedding_dim = kwargs["embedding_dim"]
         self.limit_context = kwargs["limit_context"]
         self.random_noise_inputs = kwargs["random_noise_inputs"]
+        self.temperature = kwargs["temperature"]
+        self.top_p = kwargs["top_p"]
+        self.n_gens = kwargs["n_gens"]
 
         self.model = BrainModel(
             in_channels=n_channels,
@@ -165,9 +193,9 @@ class WordClassifier(L.LightningModule):
         
         if target_tokens is not None:
             # Training mode: use teacher forcing
-            print(f"Target tokens shape: {target_tokens.shape}, dtype: {target_tokens.dtype}")
-            print(f"Target tokens device: {target_tokens.device}")
-            print(f"Brain embeddings device: {brain_embeddings.device}")
+            # print(f"Target tokens shape: {target_tokens.shape}, dtype: {target_tokens.dtype}")
+            # print(f"Target tokens device: {target_tokens.device}")
+            # print(f"Brain embeddings device: {brain_embeddings.device}")
             
             # Ensure target tokens are on the right device and of correct type
             target_tokens = target_tokens.to(brain_embeddings.device).long()
@@ -177,8 +205,8 @@ class WordClassifier(L.LightningModule):
             decoder_input_ids[:, 1:] = target_tokens[:, :-1]
             decoder_input_ids[:, 0] = self.t5_tokenizer.pad_token_id
             
-            print(f"Decoder input shape: {decoder_input_ids.shape}")
-            print(f"Decoder input sample: {decoder_input_ids[0, :10]}")
+            # print(f"Decoder input shape: {decoder_input_ids.shape}")
+            # print(f"Decoder input sample: {decoder_input_ids[0, :10]}")
             
             # Run T5 decoder with brain embeddings as encoder outputs
             outputs = self.t5_model(
@@ -189,33 +217,55 @@ class WordClassifier(L.LightningModule):
             )
             return outputs
         else:
-            # Inference mode: generate tokens
-            # Start with pad token
-            generated_ids = torch.full(
-                (batch_size, 1), 
-                self.t5_tokenizer.pad_token_id, 
-                device=brain_embeddings.device
-            )
-            
-            max_length = 50  # Reasonable max for word sequences
-            
-            for _ in range(max_length):
-                outputs = self.t5_model(
-                    encoder_outputs=encoder_outputs,
-                    decoder_input_ids=generated_ids,
-                    return_dict=True
+
+            gens = []
+            for _ in range(self.n_gens):
+                # Inference mode: generate tokens
+                # Start with pad token
+                generated_ids = torch.full(
+                    (batch_size, 1), 
+                    self.t5_tokenizer.pad_token_id, 
+                    device=brain_embeddings.device
                 )
                 
-                next_token_logits = outputs.logits[:, -1, :]
-                next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
+                max_length = 120  # Maximum sequence length for generation.
                 
-                generated_ids = torch.cat([generated_ids, next_token], dim=-1)
-                
-                # Stop if EOS token is generated
-                if next_token.item() == self.t5_tokenizer.eos_token_id:
-                    break
+                for _ in range(max_length):
+                    outputs = self.t5_model(
+                        encoder_outputs=encoder_outputs,
+                        decoder_input_ids=generated_ids,
+                        return_dict=True
+                    )
                     
-            return generated_ids
+                    next_token_logits = outputs.logits[:, -1, :] / self.temperature  # Apply temperature
+                    
+                    # Apply top-p (nucleus) sampling
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Create mask for tokens to keep (cumulative probability <= top_p)
+                    sorted_indices_to_remove = cumulative_probs > self.top_p
+                    # Keep at least one token
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    # Scatter back to original indexing
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits[indices_to_remove] = float('-inf')
+                    
+                    # Sample from the filtered distribution
+                    probs = F.softmax(next_token_logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                    
+                    generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+                    
+                    # Stop if EOS token is generated
+                    if next_token.item() == self.t5_tokenizer.eos_token_id:
+                        break
+                
+                gens.append(generated_ids)
+                    
+            return gens
     
     def _siglip_loss(self, brain_features, word_indices, discard=False):
         """
@@ -291,8 +341,8 @@ class WordClassifier(L.LightningModule):
         dataset_id = batch["dataset_id"]
         
         # Debug tokenized input
-        print(f"y_tokenized shape: {y_tokenized.shape}, dtype: {y_tokenized.dtype}")
-        print(f"y_tokenized sample: {y_tokenized[:10]}")
+        # print(f"y_tokenized shape: {y_tokenized.shape}, dtype: {y_tokenized.dtype}")
+        # print(f"y_tokenized sample: {y_tokenized[:10]}")
         
         # Get both SigLIP embeddings and T5 output
         siglip_logits, t5_output = self(x, subjects, sensor_xyz, dataset_id, 
@@ -301,15 +351,16 @@ class WordClassifier(L.LightningModule):
         
         # SigLIP loss (existing)
         siglip_loss = self._siglip_loss(siglip_logits, y, discard=True)
+
         
         # T5 generation loss
         t5_loss = t5_output.loss if hasattr(t5_output, 'loss') else torch.tensor(0.0, device=x.device)
         print(f"{stage} SigLIP loss: {siglip_loss.item()}, T5 loss: {t5_loss.item()}")
         
         # Debug T5 output
-        if hasattr(t5_output, 'logits'):
-            print(f"T5 logits shape: {t5_output.logits.shape}")
-            print(f"T5 logits contains NaN: {torch.isnan(t5_output.logits).any()}")
+        # if hasattr(t5_output, 'logits'):
+            # print(f"T5 logits shape: {t5_output.logits.shape}")
+            # print(f"T5 logits contains NaN: {torch.isnan(t5_output.logits).any()}")
         
         # Combined loss
         total_loss = siglip_loss + self.t5_loss_weight * t5_loss
@@ -349,6 +400,50 @@ class WordClassifier(L.LightningModule):
         self.log("val_acc", self.val_acc, prog_bar=True)
         self.log("val_top10acc", self.topk_val_acc, prog_bar=True)
         self.log("val_loss", loss)
+        
+        # Generate T5 output for validation monitoring
+        x = batch["meg"].squeeze(0)
+        y_tokenized = batch["words_tokenized"].squeeze(0)
+        subjects = batch["subject_id"].squeeze(0)
+        sensor_xyz = batch["sensor_xyz"]
+        dataset_id = batch["dataset_id"]
+        
+        # Get T5 generation for inference (without teacher forcing)
+        _, t5_generated = self(x, subjects, sensor_xyz, dataset_id, 
+                             target_tokens=None, 
+                             return_t5_output=True)
+        
+        # T5 WER evaluation
+        if t5_generated is not None:
+
+            generated_texts = []
+            for gen in t5_generated:
+                # Decode T5 generated tokens
+                generated_text = self.t5_tokenizer.decode(gen.squeeze(), skip_special_tokens=True)
+
+                # Truncate at 64 words
+                generated_text = " ".join(generated_text.split()[:64])
+
+                generated_texts.append(generated_text)
+            
+            # Create ground truth text from tokenized input
+            true_text = self.t5_tokenizer.decode(y_tokenized, skip_special_tokens=True)
+            
+            # Print T5 outputs for inspection
+            for q, generated_text in enumerate(generated_texts):
+                print(f"Val T5 Generated {q}: '{generated_text}'")
+            print(f"Val Ground Truth: '{true_text}'")
+
+            # Compute top n wer
+            top_n_wer = top_n_word_error_rate(reference=true_text, candidates=generated_texts)
+            self.log(f"val_top_{self.n_gens}_wer", top_n_wer)
+            print(f"Val Top-{self.n_gens} WER: {top_n_wer:.4f}")
+
+            # # Compute T5 WER
+            # t5_wer = jiwer.wer(true_text.lower(), generated_text.lower())
+            # self.log("val_t5_wer", t5_wer)
+            # print(f"Val T5 WER: {t5_wer:.4f}")
+            print("-" * 50)
 
     def _compute_sentence_metrics(self, true_sent, pred_sent):
 
@@ -433,7 +528,6 @@ class WordClassifier(L.LightningModule):
         x = batch["meg"].squeeze(0)
         y = batch["words"].squeeze(0)
         y_tokenized = batch["words_tokenized"].squeeze(0)
-        words_raw = batch["words_raw"]
         subjects = batch["subject_id"].squeeze(0)
         sensor_xyz = batch["sensor_xyz"]
         dataset_id = batch["dataset_id"]
@@ -444,9 +538,9 @@ class WordClassifier(L.LightningModule):
                                       return_t5_output=True)
         
         # Also get T5 generation for inference (without teacher forcing)
-        siglip_logits_inf, t5_generated = self(x, subjects, sensor_xyz, dataset_id, 
-                                             target_tokens=None, 
-                                             return_t5_output=True)
+        _, t5_generated = self(x, subjects, sensor_xyz, dataset_id, 
+                             target_tokens=None, 
+                             return_t5_output=True)
         
         # Calculate losses
         siglip_loss = self._siglip_loss(siglip_logits, y, discard=True)
@@ -480,20 +574,29 @@ class WordClassifier(L.LightningModule):
 
         # T5 WER evaluation
         if t5_generated is not None:
-            # Decode T5 generated tokens
-            generated_text = self.t5_tokenizer.decode(t5_generated.squeeze(), skip_special_tokens=True)
+
+            generated_texts = []
+            for gen in t5_generated:
+                # Decode T5 generated tokens
+                generated_text = self.t5_tokenizer.decode(gen.squeeze(), skip_special_tokens=True)
+
+                # Truncate at 64 words
+                generated_text = " ".join(generated_text.split()[:64])
+
+                generated_texts.append(generated_text)
             
-            # Create ground truth text from raw words
-            true_text = " ".join([word.lower() for word in words_raw])
+            # Create ground truth text from tokenized input
+            true_text = self.t5_tokenizer.decode(y_tokenized, skip_special_tokens=True)
             
             # Print T5 outputs for inspection
-            print(f"T5 Generated: '{generated_text}'")
+            for q, generated_text in enumerate(generated_texts):
+                print(f"{prefix} T5 Generated {q}: '{generated_text}'")
             print(f"Ground Truth: '{true_text}'")
             
             # Compute T5 WER
-            t5_wer = jiwer.wer(true_text, generated_text.lower())
-            self.log(f"{prefix}_t5_wer", t5_wer)
-            print(f"T5 WER: {t5_wer:.4f}")
+            top_n_wer = top_n_word_error_rate(reference=true_text, candidates=generated_texts)
+            self.log(f"{prefix}_top{self.n_gens}_t5_wer", top_n_wer)
+            print(f"T5 top-{self.n_gens} WER: {top_n_wer:.4f}")
             print("-" * 50)
 
         # Log greedy and true words that are within vocabulary (SigLIP)
@@ -539,4 +642,7 @@ class WordClassifier(L.LightningModule):
         parser.add_argument("--limit_context", type=int, default=8)
         parser.add_argument("--random_noise_inputs", action='store_true', default=False)
         parser.add_argument("--t5_loss_weight", type=float, default=1.0)
+        parser.add_argument("--temperature", type=float, default=1.0)
+        parser.add_argument("--top_p", type=float, default=0.9)
+        parser.add_argument("--n_gens", type=int, default=10, help="Number of generations for T5")
         return parent_parser
