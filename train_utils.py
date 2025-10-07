@@ -1,7 +1,7 @@
 import torch
 
 from data import dataset as ds
-from model.word_embeddings import generate_word_embeddings
+from model.word_embeddings import generate_word_embeddings, generate_audio_embeddings
 
 def construct_datasets(dset, aux_dsets, config, args):
 
@@ -10,7 +10,12 @@ def construct_datasets(dset, aux_dsets, config, args):
     # Compute embedding targets
     top_words_map, other_words = ds.find_top_words(root, args.vocab_size)
     other_words = [w for w in other_words if len(w) > 2]
-    word_embeddings = generate_word_embeddings(top_words_map.keys(), dset, args.vocab_size)
+
+    if args.audio_embeddings:
+        word_embeddings = generate_audio_embeddings(top_words_map.keys(), dset, args.vocab_size)
+    else:
+        word_embeddings = generate_word_embeddings(top_words_map.keys(), dset, args.vocab_size)
+
     print(f"Computed top {len(top_words_map)} words; {len(other_words)} other words")
 
     datasets = {}

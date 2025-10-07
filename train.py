@@ -38,6 +38,7 @@ def cli_main():
     parser.add_argument('--name', type=str, default="word-decoding")
     parser.add_argument('--train_scale', type=float, default=1.0)
     parser.add_argument('--predict_oov', action="store_true", default=False)
+    parser.add_argument('--audio_embeddings', action="store_true", default=False)
     
     # Add model specific args
     parser = WordClassifier.add_model_specific_args(parser)

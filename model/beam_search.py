@@ -4,17 +4,10 @@ import torch
 import threading
 import queue
 import math
-import kenlm
 
 from string import punctuation
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-kenlm_model_path = "model.arpa.binary"
-if os.path.exists(kenlm_model_path):
-    kenlm_model = kenlm.Model(kenlm_model_path)
-else:
-    kenlm_model = None
 
 # Use a smaller Llama variant for speed if possible
 model_name = "meta-llama/Llama-3.2-1B"
@@ -88,34 +81,23 @@ def process_beam_batch(beam_batch, position, asr_predictions, vocabulary, beam_w
 
         else:
 
-            if not use_kenlm:
-                with torch.no_grad():
-                    if limit_context is not None:
-                        probs = get_llama_lm_score(" ".join(prev_sequence.split()[-limit_context:]))
-                    else:
-                        probs = get_llama_lm_score(prev_sequence)
+            with torch.no_grad():
+                if limit_context is not None:
+                    probs = get_llama_lm_score(" ".join(prev_sequence.split()[-limit_context:]))
+                else:
+                    probs = get_llama_lm_score(prev_sequence)
             
             # Get top N words from ASR for this position
             top_indices = torch.argsort(asr_predictions[position])
             top_words = [(vocabulary[idx], asr_predictions[position][idx]) for idx in top_indices[-beam_width:]]
             
             for word, asr_log_prob in top_words:
-
-                if use_kenlm:
-                    sequence = prev_sequence + " " + word
-                    # Get sequence probability and context probability
-                    sequence_log_prob = kenlm_model.score(sequence, bos=False, eos=False)
-                    context_log_prob = kenlm_model.score(prev_sequence, bos=False, eos=False)
-
-                    # Convert from log space and calculate conditional probability
-                    # P(word|context) = P(context,word) / P(context)
-                    lm_log_prob = sequence_log_prob - context_log_prob
-                else:
-                    next_word_tokens = tokenizer.encode(" " + word)[1:]  # Skip the BOS token
-                    lm_log_prob = probs[next_word_tokens[0]].item()
                     
-                    # Scale LM score based on vocabulary size
-                    lm_log_prob += scaling
+                next_word_tokens = tokenizer.encode(" " + word)[1:]  # Skip the BOS token
+                lm_log_prob = probs[next_word_tokens[0]].item()
+                
+                # Scale LM score based on vocabulary size
+                lm_log_prob += scaling
                 
                 # Combine scores (log domain)
                 new_score = prev_score + asr_log_prob + lm_weight * lm_log_prob

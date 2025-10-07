@@ -21,6 +21,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 
 from model.brainmagick.brain_model import BrainModel
 from model.beam_search import beam_search_with_llama_threaded
+from model.qwen_beam_search import qwen_beam_search
 from model.contrastive import SigLipLoss
 from model.custom_whisper_forward import custom_forward
 from model import oov_predictor
@@ -29,10 +30,6 @@ import nltk
 from nltk.translate.bleu_score import sentence_bleu
 from rouge_score import rouge_scorer
 from nltk.translate.meteor_score import meteor_score
-
-import model.labram_finetune
-import timm.models
-from timm.models import create_model
 
 import textdistance
 from g2p_en import G2p
@@ -43,11 +40,11 @@ nltk.download('wordnet')
 nltk.download('omw-1.4')
 nltk.download('averaged_perceptron_tagger_eng') # For g2p_en
 
-# from model.claude_infilling import infill_sentences
-from model.infilling import infill_sentences, batch_in_context_beam_search, replace_unks_alt
-# from model.deepseek_infilling import model_call
-from model.gemini_infilling import model_call as gemini_model_call
-from model.claude_infilling import model_call
+# # from model.claude_infilling import infill_sentences
+# from model.infilling import infill_sentences, batch_in_context_beam_search, replace_unks_alt
+# # from model.deepseek_infilling import model_call
+# from model.gemini_infilling import model_call as gemini_model_call
+# from model.claude_infilling import model_call
 
 
 class WordClassifier(L.LightningModule):
@@ -71,58 +68,21 @@ class WordClassifier(L.LightningModule):
         self.other_words = set(other_words)
 
         self.beam_width = kwargs["beam_width"]
-        self.lm_weight = kwargs["lm_weight"]
         self.pretrained_transformer = kwargs["pretrained_transformer"]
         self.pretrained_encoder = kwargs["pretrained_encoder"]
         self.post_proc = kwargs["post_proc"]
         self.embedding_dim = kwargs["embedding_dim"]
-        self.limit_context = kwargs["limit_context"]
         self.greedy_only = kwargs["greedy_only"]
         self.no_llm_api = kwargs["no_llm_api"]
         self.random_noise_inputs = kwargs["random_noise_inputs"]
-        self.use_kenlm = kwargs["use_kenlm"]
 
-        if not self.pretrained_encoder:
-            self.model = BrainModel(
-                in_channels=n_channels,
-                out_channels=1024,
-                n_subjects=n_subjects,
-                dataset=kwargs["dataset"],
-                har_type=kwargs["har_type"],
-            )
-        else:
-            # Load pretrained LaBraM model
-            checkpoint = torch.load(
-                "/data/engs-pnpl/lina4368/projects/EEGPT/downstream/Modules/LaBraM/labram-base.pth",
-                weights_only=False,
-            )
-            new_checkpoint = {}
-            for k,v in checkpoint['model'].items():
-                if k.startswith('student.'):
-                    new_checkpoint[k[len('student.'):]] = v
-            model = create_model("labram_base_patch200_200", 
-                                    qkv_bias=False,
-                                    rel_pos_bias=True,
-                                    num_classes=4,
-                                    drop_rate=0.0,
-                                    drop_path_rate=0.1,
-                                    attn_drop_rate=0.0,
-                                    drop_block_rate=None,
-                                    use_mean_pooling=True,
-                                    init_scale=0.001,
-                                    use_rel_pos_bias=True,
-                                    use_abs_pos_emb=True,
-                                    init_values=0.1,)
-            model.load_state_dict(new_checkpoint, strict=False)
-            self.model = model
-            self.chan_conv = torch.nn.Conv1d(n_channels, 19, kernel_size=1)
-            self.enc_projector = torch.nn.Linear(96, 1024)
-
-            # Freeze parameters to start with
-            for blk in model.blocks:
-                for p in blk.parameters():
-                    p.requires_grad = False
-            # NOTE: requires projection of channels to 19-dim + padding of input to 1100-len
+        self.model = BrainModel(
+            in_channels=n_channels,
+            out_channels=1024,
+            n_subjects=n_subjects,
+            dataset=kwargs["dataset"],
+            har_type=kwargs["har_type"],
+        )
 
         if not self.pretrained_transformer:
             self.transformer = Encoder(
@@ -471,24 +431,6 @@ class WordClassifier(L.LightningModule):
         if self.post_proc:
             results = self.test_step_outputs
 
-            if not self.greedy_only:
-
-                if not self.no_llm_api:
-                    print("Generating in-context beam search predictions with LLM...")
-                    prediction_infos = [result["prediction_info"] for result in results]
-                    llm_sents = asyncio.run(batch_in_context_beam_search(prediction_infos, model_call))
-
-                    print("Generating LLM in-fillings from algorithmically beamed sentences...")
-                    beam_maskeds = [result["beam_masked"] for result in results]
-                    # Generate info for in-filling beamed sentences
-                    infill_infos = []
-                    for beam_masked in beam_maskeds:
-                        infill_info = ""
-                        for i, token in enumerate(beam_masked.split()):
-                            infill_info += f"\n[{i}]: {token.lower()}"
-                        infill_infos.append(infill_info.strip())
-                    llm_filleds = asyncio.run(infill_sentences(infill_infos, model_call))
-
             data = []
 
             # Create sentence beam metrics csv header (replace if existing)
@@ -507,15 +449,8 @@ class WordClassifier(L.LightningModule):
                     self._log_sentence_metrics(true_sent, beam_sent, prefix="beam")
                     self._log_sentence_metrics(true_sent, beam_sent_filled, prefix="beam_filled", add_to_csv=True)
                     self._log_sentence_metrics(true_sent, beam_sent_random_filled, prefix="beam_random_filled")
-
-                    if not self.no_llm_api:
-                        llm_sent = llm_sents[i]
-                        llm_filled_sent = llm_filleds[i]
-                        self._log_sentence_metrics(true_sent, llm_sent, prefix="llm_search_and_filled")
-                        self._log_sentence_metrics(true_sent, llm_filled_sent, prefix="llm_filled")
-                    else:
-                        llm_sent = ""
-                        llm_filled_sent = ""
+                    llm_sent = ""
+                    llm_filled_sent = ""
 
                 else:
                     beam_sent = ""
@@ -663,34 +598,17 @@ class WordClassifier(L.LightningModule):
                     else:
                         prediction_info += f"\n[{pos}]: [UNK]"
 
-                beam_masked = beam_search_with_llama_threaded(
+                beam_sent = qwen_beam_search(
                     asr_predictions=full_preds,
-                    missing_mask=missing_mask,
-                    predict_missing=False,
                     vocabulary=[w.lower() for w in self.top_words_map.keys()],
                     beam_width=self.beam_width,
-                    lm_weight=self.lm_weight,
-                    num_threads=min(self.beam_width, 5),
-                    limit_context=self.limit_context,
-                    use_kenlm=self.use_kenlm,
+                    top_k_candidates=10,
                 ).strip()
-                beam_sent = beam_masked
-                # beam_sent = beam_masked.replace("[UNK] ", "").replace("[UNK]", "").strip()
 
-                # Randomly fill [UNK] tokens
-                beam_sent_random_filled = replace_unks_alt(beam_masked, list(self.other_words))
-
-                beam_sent_filled = beam_search_with_llama_threaded(
-                    asr_predictions=full_preds,
-                    missing_mask=missing_mask,
-                    predict_missing=True,
-                    vocabulary=[w.lower() for w in self.top_words_map.keys()],
-                    beam_width=self.beam_width,
-                    lm_weight=self.lm_weight,
-                    num_threads=min(self.beam_width, 5),
-                    limit_context=self.limit_context,
-                    use_kenlm=self.use_kenlm,
-                )
+                # No more separate beam_masked or beam_sent_filled since we always predict
+                beam_masked = beam_sent
+                beam_sent_filled = beam_sent
+                beam_sent_random_filled = beam_sent
             else:
                 prediction_info = ""
                 beam_masked = ""
@@ -706,7 +624,8 @@ class WordClassifier(L.LightningModule):
             ])
 
             # Replace [UNK]s with random words outside vocabulary
-            greedy_random_filled = replace_unks_alt(greedy_sent, list(self.other_words))
+            # greedy_random_filled = replace_unks_alt(greedy_sent, list(self.other_words))
+            greedy_random_filled = greedy_sent
 
             # Construct fully random selection baseline with random within-vocab words at in-vocab positions and random out-of-vocab words at out-of-vocab positions
             random_sent = " ".join([
@@ -762,15 +681,12 @@ class WordClassifier(L.LightningModule):
         parser = parent_parser.add_argument_group("WordClassifier")
         parser.add_argument("--learning_rate", type=float, default=1e-5)
         parser.add_argument("--beam_width", type=int, default=5)
-        parser.add_argument("--lm_weight", type=float, default=1.5)
         parser.add_argument("--har_type", type=str, default='spatial_attention')
         parser.add_argument("--pretrained_transformer", action='store_true', default=False)
         parser.add_argument("--pretrained_encoder", action='store_true', default=False)
         parser.add_argument("--embedding_dim", type=int, default=1024)
         parser.add_argument("--post_proc", action='store_true', default=False)
-        parser.add_argument("--limit_context", type=int, default=8)
         parser.add_argument("--greedy_only", action='store_true', default=False)
         parser.add_argument("--no_llm_api", action='store_true', default=False)
         parser.add_argument("--random_noise_inputs", action='store_true', default=False)
-        parser.add_argument("--use_kenlm", action='store_true', default=False)
         return parent_parser
