@@ -214,7 +214,7 @@ class MEGDataset(torch.utils.data.Dataset):
         
         words = []
         for word in sample.chunk["words"]:
-            if word in self.top_words_map:
+            if len(self.top_words_map) == 0 or word in self.top_words_map:
                 words.append(self.top_words_map[word])
             else:
                 words.append(-1)
@@ -238,6 +238,7 @@ if __name__ == "__main__":
         tasks=["compr"],
         dataset="armeni2022",
         context=0,
+        top_words_map={"sherlock"},
     )
 
     x = dataset.__getitem__(0)

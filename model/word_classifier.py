@@ -602,7 +602,6 @@ class WordClassifier(L.LightningModule):
                     asr_predictions=full_preds,
                     vocabulary=[w.lower() for w in self.top_words_map.keys()],
                     beam_width=self.beam_width,
-                    top_k_candidates=10,
                 ).strip()
 
                 # No more separate beam_masked or beam_sent_filled since we always predict
@@ -681,7 +680,7 @@ class WordClassifier(L.LightningModule):
         parser = parent_parser.add_argument_group("WordClassifier")
         parser.add_argument("--learning_rate", type=float, default=1e-5)
         parser.add_argument("--beam_width", type=int, default=5)
-        parser.add_argument("--har_type", type=str, default='spatial_attention')
+        parser.add_argument("--har_type", type=str, default="gating") # default='spatial_attention')
         parser.add_argument("--pretrained_transformer", action='store_true', default=False)
         parser.add_argument("--pretrained_encoder", action='store_true', default=False)
         parser.add_argument("--embedding_dim", type=int, default=1024)
