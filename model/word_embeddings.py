@@ -1,7 +1,5 @@
 import torch
-from transformers import T5EncoderModel, T5Tokenizer, AutoModelForCausalLM, AutoTokenizer
-
-import torch.nn.functional as F
+from transformers import T5EncoderModel, T5Tokenizer
 
 def generate_word_embeddings(vocab, dataset, vocab_size, layer=12):
 
@@ -35,33 +33,3 @@ def generate_word_embeddings(vocab, dataset, vocab_size, layer=12):
 
     return embeddings
 
-def generate_audio_embeddings(vocab, dataset, vocab_size, layer=12):
-
-    try:
-        embeddings = torch.load(f'audio_embeddings_{dataset}_{vocab_size}.pt')
-        return embeddings
-    except Exception:
-        pass
-
-    import joblib
-
-    # Load audio embeddings from pkl
-    word_embeddings = joblib.load('word_embeddings_robust.joblib')
-
-    embeddings = []
-    for word in vocab:
-        word = word.lower()
-        if word in word_embeddings:
-            emb = torch.tensor(word_embeddings[word])
-            # Normalize the embedding
-            emb = F.normalize(emb, p=2, dim=-1)
-        else:
-            print(f"Word '{word}' not found in word embeddings.")
-            emb = torch.zeros(1024)
-        embeddings.append(emb)
-
-    embeddings = torch.stack(embeddings, dim=0)  # [vocab_size, 1024?]
-
-    torch.save(embeddings, f'audio_embeddings_{dataset}_{vocab_size}.pt')
-
-    return embeddings

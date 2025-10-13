@@ -9,7 +9,6 @@ from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
 from model.word_classifier import WordClassifier
-from model import oov_predictor
 
 from train_utils import construct_datasets
 
@@ -37,8 +36,8 @@ def cli_main():
     parser.add_argument('--patience', type=int, default=5)
     parser.add_argument('--name', type=str, default="word-decoding")
     parser.add_argument('--train_scale', type=float, default=1.0)
-    parser.add_argument('--predict_oov', action="store_true", default=False)
-    parser.add_argument('--audio_embeddings', action="store_true", default=False)
+    parser.add_argument('--save_train_transcripts', action="store_true", default=False)
+    parser.add_argument('--save_train_transcripts_name', type=str, default="train_transcripts.csv")
     
     # Add model specific args
     parser = WordClassifier.add_model_specific_args(parser)
@@ -56,7 +55,7 @@ def cli_main():
     )
     print("Top words:", top_words_map.keys())
     
-    if args.test_ckpt is None or args.predict_oov:
+    if args.test_ckpt is None:
         train_loader = DataLoader(
             datasets["train"],
             batch_size=args.batch_size,
@@ -161,22 +160,15 @@ def cli_main():
             **vars(args)
         )
 
-    if args.predict_oov:
-        if not os.path.exists("train_oov_preds.csv"):
-            # Write train predictions to file
-            print("Writing train predictions to file")
-            trainer.predict(
-                model,
-                train_loader,
-            )
-        if not os.path.exists("train_oov_predictor.json"):
-            # Train XGBoost model on the probabilities
-            print("Training XGBoost model")
-            oov_model, oov_scaler, _, _, _, _, _ = oov_predictor.main_xgboost()
-        else:
-            # Load XGBoost model from file
-            print("Loading XGBoost model from file")
-            oov_model, oov_scaler = oov_predictor.load_model()
+    if args.save_train_transcripts:
+        # Generate transcripts from train set
+        print(f"Generating transcripts from train set and saving to {args.save_train_transcripts_name}")
+        model.save_transcripts = True
+        model.transcript_output_file = args.save_train_transcripts_name
+        trainer.predict(model, train_loader)
+        model.save_transcripts = False
+        print(f"Transcripts saved to {args.save_train_transcripts_name}")
+        return
 
     if "holdout" in datasets:
         holdout_loader = DataLoader(
@@ -190,10 +182,6 @@ def cli_main():
             'holdout': holdout_loader
         })
     else:
-        if args.predict_oov:
-            # Give model access to XGBoost oov model
-            model.oov_model = oov_model
-            model.oov_scaler = oov_scaler
         trainer.test(model, test_loader)
 
 if __name__ == '__main__':
