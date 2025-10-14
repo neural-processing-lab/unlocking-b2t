@@ -8,7 +8,6 @@ import tqdm
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchmetrics import Accuracy
-from torchmetrics.classification import MulticlassConfusionMatrix
 from x_transformers import Encoder
 
 from model.brainmagick.brain_model import BrainModel
@@ -40,6 +39,8 @@ class WordClassifier(L.LightningModule):
         self.other_words = set(other_words)
 
         self.beam_width = kwargs["beam_width"]
+        self.temperature = kwargs["temperature"]
+        self.num_return_sequences = kwargs["num_return_sequences"]
         self.post_proc = kwargs["post_proc"]
         self.embedding_dim = kwargs["embedding_dim"]
         self.greedy_only = kwargs["greedy_only"]
@@ -74,9 +75,6 @@ class WordClassifier(L.LightningModule):
 
         self.val_beam_acc = Accuracy(task="multiclass", average="macro", num_classes=n_classes)
         self.test_beam_acc = Accuracy(task="multiclass", average="macro", num_classes=n_classes)
-
-        # Confusion matrix for word predictions
-        self.test_confusion_matrix = MulticlassConfusionMatrix(num_classes=n_classes)
 
         self.siglip_loss = SigLipLoss()
 
@@ -202,12 +200,15 @@ class WordClassifier(L.LightningModule):
             true_words = [w[0] for w in batch["words_raw"]]
             true_sent = " ".join(true_words).lower()
 
-            # Generate predicted transcript using beam search
-            pred_sent = qwen_beam_search(
+            # Generate predicted transcript using beam search (get top beam)
+            pred_sents = qwen_beam_search(
                 asr_predictions=full_preds,
                 vocabulary=[w.lower() for w in self.top_words_map.keys()],
                 beam_width=self.beam_width,
-            ).strip()
+                num_return_sequences=1,
+                temperature=self.temperature,
+            )
+            pred_sent = pred_sents[0].strip()
 
             # Store predictions for later logging
             self.predict_step_outputs.append({
@@ -285,57 +286,51 @@ class WordClassifier(L.LightningModule):
 
 
     def on_test_epoch_end(self):
-        # Compute and log confusion matrix for word predictions
-        true_indices = []
-        pred_indices = []
-        for ws in self.test_step_outputs:
-            for true_word in ws["true_words"]:
-                true_indices.append(self.top_words_map[true_word.upper()])
-            for pred_word in ws["pred_words"]:
-                pred_indices.append(self.top_words_map[pred_word.upper()])
-
-        if len(true_indices) > 0 and len(pred_indices) > 0:
-            true_tensor = torch.tensor(true_indices, device=self.device)
-            pred_tensor = torch.tensor(pred_indices, device=self.device)
-
-            self.test_confusion_matrix(pred_tensor, true_tensor)
-            cm = self.test_confusion_matrix.compute()
-
-            # Log confusion matrix as a figure
-            import matplotlib.pyplot as plt
-            import seaborn as sns
-
-            fig, ax = plt.subplots(figsize=(20, 20))
-            sns.heatmap(cm.cpu().numpy(), cmap='Blues', ax=ax, square=True, cbar=True)
-            ax.set_xlabel('Predicted')
-            ax.set_ylabel('True')
-            ax.set_title('Word Prediction Confusion Matrix')
-
-            self.logger.experiment.log({"confusion_matrix": fig})
-            plt.close()
-
         if self.post_proc:
             results = self.test_step_outputs
             data = []
 
+            # Print first example's predictions for inspection
+            if results and not self.greedy_only:
+                first_result = results[0]
+                print("\n" + "="*80)
+                print("FIRST TEST EXAMPLE - Top-K Beam Predictions:")
+                print("="*80)
+                print(f"TRUE:   {first_result['true_sent']}")
+                print(f"GREEDY: {first_result['greedy_sent']}")
+                print(f"\nTop-{len(first_result['beam_sents'])} Beam Predictions:")
+                for i, beam_sent in enumerate(first_result['beam_sents'], 1):
+                    print(f"  [{i}] {beam_sent}")
+                print("="*80 + "\n")
+
             print("Logging predictions...")
             for result in tqdm.tqdm(results):
                 true_sent = result["true_sent"]
+                greedy_sent = result["greedy_sent"]
 
                 if not self.greedy_only:
-                    beam_sent = result["beam_sent"]
-                    self._log_sentence_metrics(true_sent, beam_sent, prefix="beam")
-                else:
-                    beam_sent = ""
+                    beam_sents = result["beam_sents"]
 
-                greedy_sent = result["greedy_sent"]
+                    # Log metrics for the best (first) beam
+                    if beam_sents:
+                        self._log_sentence_metrics(true_sent, beam_sents[0], prefix="beam_top1")
+
+                    # Format all beam sentences for display
+                    beam_display = "\n".join([f"[{i+1}] {s}" for i, s in enumerate(beam_sents)])
+                else:
+                    beam_display = ""
+
                 self._log_sentence_metrics(true_sent, greedy_sent, prefix="greedy")
 
-                data.append([true_sent, greedy_sent, beam_sent])
+                # Add to table with all beams displayed
+                data.append([true_sent, greedy_sent, beam_display])
+
+            # Create columns list dynamically
+            columns = ["true", "greedy", "beams"]
 
             self.logger.log_text(
                 key="predictions",
-                columns=["true", "greedy", "beam"],
+                columns=columns,
                 data=data
             )
 
@@ -372,13 +367,18 @@ class WordClassifier(L.LightningModule):
             true_sent = " ".join(true).lower()
 
             if not self.greedy_only:
-                beam_sent = qwen_beam_search(
+                # Get multiple diverse beam sequences
+                beam_sents = qwen_beam_search(
                     asr_predictions=full_preds,
                     vocabulary=[w.lower() for w in self.top_words_map.keys()],
                     beam_width=self.beam_width,
-                ).strip()
+                    num_return_sequences=self.num_return_sequences,
+                    temperature=self.temperature,
+                )
+                # Strip whitespace from all returned sequences
+                beam_sents = [s.strip() for s in beam_sents]
             else:
-                beam_sent = ""
+                beam_sents = []
 
             # Compute greedy sentence
             greedy_indices = full_preds.argmax(dim=-1)
@@ -388,7 +388,7 @@ class WordClassifier(L.LightningModule):
 
             self.test_step_outputs.append({
                 "true_sent": true_sent,
-                "beam_sent": beam_sent,
+                "beam_sents": beam_sents,  # Now a list of sentences
                 "greedy_sent": greedy_sent,
                 "true_words": true_words,
                 "pred_words": pred_words,
@@ -429,6 +429,8 @@ class WordClassifier(L.LightningModule):
         parser = parent_parser.add_argument_group("WordClassifier")
         parser.add_argument("--learning_rate", type=float, default=1e-5)
         parser.add_argument("--beam_width", type=int, default=5)
+        parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for beam search diversity (>1 = more diverse)")
+        parser.add_argument("--num_return_sequences", type=int, default=5, help="Number of diverse beam sequences to return")
         parser.add_argument("--har_type", type=str, default="gating") # default='spatial_attention')
         parser.add_argument("--embedding_dim", type=int, default=1024)
         parser.add_argument("--post_proc", action='store_true', default=False)

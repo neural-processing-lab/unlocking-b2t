@@ -32,7 +32,7 @@ def construct_datasets(dset, aux_dsets, config, args):
         
         for train_set in train_sets:
 
-            if args.test_ckpt is None or args.predict_oov:
+            if args.test_ckpt is None:
                 print(f"Loading train set for {dataset_name}")
 
                 if dset == "armeni2022" and dataset_name == "libribrain":
@@ -66,7 +66,7 @@ def construct_datasets(dset, aux_dsets, config, args):
     
     max_channels = max(all_channels)
 
-    if args.test_ckpt is None or args.predict_oov:
+    if args.test_ckpt is None:
         datasets["train"] = torch.utils.data.ConcatDataset(torch_train_datasets)
 
         if args.train_scale < 1.0:

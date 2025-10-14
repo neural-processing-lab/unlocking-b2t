@@ -87,57 +87,106 @@ def qwen_beam_search(
     asr_predictions: torch.Tensor,
     vocabulary: List[str],
     beam_width: int = 10,
-) -> str:
+    num_return_sequences: int = 1,
+    temperature: float = 1.0,
+) -> List[str]:
     """
-    Beam search with Qwen language model using sequence-level probabilities.
+    Stochastic beam search with Qwen language model using sequence-level probabilities.
 
     Args:
         asr_predictions: ASR predictions [seq_len, vocab_size] (raw logits or log probs)
         vocabulary: List of vocabulary words
         beam_width: Number of beams to maintain and candidates to evaluate per position
+        num_return_sequences: Number of top sequences to return (default: 1 for backward compatibility)
+        temperature: Temperature for sampling diversity (>1 = more diverse, <1 = more focused)
 
     Returns:
-        The best predicted sequence as a string
+        List of top num_return_sequences predicted sequences as strings
     """
     # Initialize beams
     beams = [{"sequence": "", "log_prob": 0.0}]
 
+    # Apply temperature scaling to logits BEFORE softmax
+    if temperature == 0.0:
+        # No scaling for deterministic case
+        scaled_logits = asr_predictions
+    else:
+        scaled_logits = asr_predictions / temperature
+
     # Ensure ASR predictions are log probabilities
-    asr_log_probs = torch.log_softmax(asr_predictions, dim=-1)
+    asr_log_probs = torch.log_softmax(scaled_logits, dim=-1)
+
+    # Also get regular probabilities for sampling (only needed for stochastic case)
+    if temperature > 0.0:
+        asr_probs = torch.softmax(scaled_logits, dim=-1)
+    else:
+        asr_probs = None
 
     for position in range(len(asr_predictions)):
-        # Get top-K candidates from ASR for this position
-        top_k = min(beam_width, len(vocabulary))
-        topk_indices = torch.argsort(asr_log_probs[position], descending=True)[:top_k]
-
         # Collect all candidate sequences from all beams
         all_sequences = []
         all_asr_log_probs = []
 
-        for beam in beams:
-            prev_sequence = beam["sequence"]
-            prev_log_prob = beam["log_prob"]
+        top_k = min(beam_width, len(vocabulary))
 
-            for idx in topk_indices:
-                word = vocabulary[idx.item()]
-                asr_log_prob = asr_log_probs[position, idx].item()
+        # Deterministic case: all beams share the same top-K candidates
+        if temperature == 0.0:
+            topk_indices = torch.argsort(asr_log_probs[position], descending=True)[:top_k]
 
-                # Construct new sequence
-                new_sequence = prev_sequence + (" " if prev_sequence else "") + word
-                all_sequences.append(new_sequence)
-                all_asr_log_probs.append(prev_log_prob + asr_log_prob)
+            for beam in beams:
+                prev_sequence = beam["sequence"]
+                prev_log_prob = beam["log_prob"]
+
+                for idx in topk_indices:
+                    word = vocabulary[idx.item()]
+                    asr_log_prob = asr_log_probs[position, idx].item()
+
+                    # Construct new sequence
+                    new_sequence = prev_sequence + (" " if prev_sequence else "") + word
+                    all_sequences.append(new_sequence)
+                    all_asr_log_probs.append(prev_log_prob + asr_log_prob)
+
+        # Stochastic case: each beam samples its own candidates
+        else:
+            for beam in beams:
+                prev_sequence = beam["sequence"]
+                prev_log_prob = beam["log_prob"]
+
+                # Each beam samples its own candidates from the probability distribution
+                topk_indices = torch.multinomial(asr_probs[position], num_samples=top_k, replacement=False)
+
+                for idx in topk_indices:
+                    word = vocabulary[idx.item()]
+                    asr_log_prob = asr_log_probs[position, idx].item()
+
+                    # Construct new sequence
+                    new_sequence = prev_sequence + (" " if prev_sequence else "") + word
+                    all_sequences.append(new_sequence)
+                    all_asr_log_probs.append(prev_log_prob + asr_log_prob)
 
         # Batch compute LM sequence probabilities for ALL candidates
         lm_log_probs = get_sequence_log_probs(all_sequences)
 
-        # Normalize LM probabilities across all candidates at this step
-        lm_probs = normalize_log_probs(lm_log_probs)
-        lm_log_probs_normalized = np.log(lm_probs + 1e-10)
+        # Also compute LM log probs for the prefix sequences (before adding new word)
+        # to get incremental probabilities
+        prefix_sequences = []
+        for beam in beams:
+            for _ in range(top_k):
+                prefix_sequences.append(beam["sequence"])
+
+        # Get LM scores for prefixes (unless this is the first position)
+        if position == 0:
+            # First position has no prefix
+            lm_prefix_log_probs = np.zeros(len(prefix_sequences))
+        else:
+            lm_prefix_log_probs = get_sequence_log_probs(prefix_sequences)
 
         # Combine ASR and LM probabilities (both in log space)
+        # Use incremental LM probability: p(w1...wn) - p(w1...wn-1)
         candidates = []
-        for seq, asr_log_prob, lm_log_prob in zip(all_sequences, all_asr_log_probs, lm_log_probs_normalized):
-            combined_log_prob = asr_log_prob + lm_log_prob
+        for i, (seq, asr_log_prob, lm_log_prob) in enumerate(zip(all_sequences, all_asr_log_probs, lm_log_probs)):
+            lm_incremental = lm_log_prob - lm_prefix_log_probs[i]
+            combined_log_prob = asr_log_prob + lm_incremental
             candidates.append({
                 "sequence": seq,
                 "log_prob": combined_log_prob
@@ -146,8 +195,8 @@ def qwen_beam_search(
         # Keep top beam_width candidates
         beams = sorted(candidates, key=lambda x: x["log_prob"], reverse=True)[:beam_width]
 
-    # Return the best sequence
-    return beams[0]["sequence"]
+    # Return the top num_return_sequences
+    return [beam["sequence"] for beam in beams[:num_return_sequences]]
 
 
 if __name__ == "__main__":
