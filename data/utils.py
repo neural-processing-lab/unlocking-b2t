@@ -152,10 +152,11 @@ def get_all_libribrain_words(bids_root):
 
 
 def get_libribrain_word_chunks(
-        bids_root, subject, session, task, run, sample_freq, batch_size=64, overlap=0
+        bids_root, subject, session, task, run, sample_freq, batch_size=64, overlap=0,
+        sentence_aligned=False
 ):
-    """Get continuous chunks of words with their onsets from the Armeni dataset.
-    
+    """Get continuous chunks of words with their onsets from the LibriBrain dataset.
+
     Args:
         bids_root (str): Path to BIDS root directory
         subject (str): Subject ID
@@ -163,38 +164,86 @@ def get_libribrain_word_chunks(
         task (str): Task name
         run (str): Run number
         sample_freq (float): Sampling frequency
-        batch_size (int): Size of each continuous chunk of words
+        batch_size (int): Size of each continuous chunk of words (max length when sentence_aligned=True)
         overlap (int): Number of words to overlap between chunks
-    
+        sentence_aligned (bool): If True, create chunks aligned to sentence boundaries
+
     Returns:
-        list of dicts: Each dict contains onsets and words for a chunk
+        list of dicts: Each dict contains onsets, words, and optionally sentence_length for a chunk
     """
     events_path = f"{bids_root}/{task}/derivatives/events/sub-{subject}_ses-{session}_task-{task}_run-{run}_events.tsv"
     events = pd.read_csv(events_path, sep="\t")
-    
+
     # Filter for word events and remove speech markers
     word_events = events[["word" in c for c in list(events["kind"])]]
-    
-    chunks = []
-    stride = batch_size - overlap
-    
-    # Generate chunks with overlap
-    for start_idx in range(0, len(word_events) - batch_size + 1, stride):
-        chunk = word_events.iloc[start_idx:start_idx + batch_size]
-        
-        # Convert onsets to samples
-        onsets = [round(float(t) * sample_freq) for t in chunk["timemeg"].values]
 
-        words = list(chunk["segment"].values)
-        words = [str(w).strip().upper() for w in words]
-        
-        chunks.append({
-            "onsets": onsets,
-            "words": words,
-            "start_idx": start_idx,
-            "end_idx": start_idx + batch_size
-        })
-    
+    chunks = []
+
+    if sentence_aligned:
+        # Group words by sentence
+        # Reset index to ensure positional indexing works correctly
+        word_events = word_events.reset_index(drop=True)
+        word_events['sentenceidx'] = word_events['sentenceidx'].fillna(-1).astype(int)
+
+        for sentence_idx in word_events['sentenceidx'].unique():
+            if sentence_idx == -1:
+                continue  # Skip words without sentence index
+
+            sentence_words = word_events[word_events['sentenceidx'] == sentence_idx]
+
+            # Skip sentences longer than batch_size
+            if len(sentence_words) > batch_size:
+                print(f"Warning: Skipping sentence {sentence_idx} with {len(sentence_words)} words (> {batch_size})")
+                continue
+
+            sentence_length = len(sentence_words)
+            # Get the positional index (0-based) of the first word in this sentence
+            start_pos = sentence_words.index[0]
+
+            # Get batch_size words starting from the sentence (includes words after the sentence)
+            # This ensures we always have batch_size MEG windows with real data
+            end_pos = min(start_pos + batch_size, len(word_events))
+            chunk_words = word_events.iloc[start_pos:end_pos]
+
+            # Convert onsets to samples
+            onsets = [round(float(t) * sample_freq) for t in chunk_words["timemeg"].values]
+
+            words = list(chunk_words["segment"].values)
+            words = [str(w).strip().upper() for w in words]
+
+            # If we still don't have batch_size words (near end of recording), skip
+            if len(words) < batch_size:
+                print(f"Warning: Skipping sentence {sentence_idx} - not enough following words")
+                continue
+
+            chunks.append({
+                "onsets": onsets,
+                "words": words,
+                "sentence_length": sentence_length,  # Only the length of the first sentence
+                "sentenceidx": sentence_idx,
+                "start_idx": start_pos,
+                "end_idx": end_pos
+            })
+    else:
+        # Original behavior: fixed-size chunks with overlap
+        stride = batch_size - overlap
+
+        for start_idx in range(0, len(word_events) - batch_size + 1, stride):
+            chunk = word_events.iloc[start_idx:start_idx + batch_size]
+
+            # Convert onsets to samples
+            onsets = [round(float(t) * sample_freq) for t in chunk["timemeg"].values]
+
+            words = list(chunk["segment"].values)
+            words = [str(w).strip().upper() for w in words]
+
+            chunks.append({
+                "onsets": onsets,
+                "words": words,
+                "start_idx": start_idx,
+                "end_idx": start_idx + batch_size
+            })
+
     return chunks
 
 def get_all_gwilliams_words(bids_root):

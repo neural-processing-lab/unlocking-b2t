@@ -89,6 +89,7 @@ def qwen_beam_search(
     beam_width: int = 10,
     num_return_sequences: int = 1,
     temperature: float = 1.0,
+    max_length: Optional[int] = None,
 ) -> List[str]:
     """
     Stochastic beam search with Qwen language model using sequence-level probabilities.
@@ -99,12 +100,16 @@ def qwen_beam_search(
         beam_width: Number of beams to maintain and candidates to evaluate per position
         num_return_sequences: Number of top sequences to return (default: 1 for backward compatibility)
         temperature: Temperature for sampling diversity (>1 = more diverse, <1 = more focused)
+        max_length: Maximum sequence length to generate. If None, uses full length of asr_predictions
 
     Returns:
         List of top num_return_sequences predicted sequences as strings
     """
     # Initialize beams
     beams = [{"sequence": "", "log_prob": 0.0}]
+
+    # Determine actual sequence length to process
+    sequence_length = max_length if max_length is not None else len(asr_predictions)
 
     # Apply temperature scaling to logits BEFORE softmax
     if temperature == 0.0:
@@ -122,7 +127,7 @@ def qwen_beam_search(
     else:
         asr_probs = None
 
-    for position in range(len(asr_predictions)):
+    for position in range(sequence_length):
         # Collect all candidate sequences from all beams
         all_sequences = []
         all_asr_log_probs = []

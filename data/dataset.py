@@ -63,7 +63,7 @@ class MEGDataset(torch.utils.data.Dataset):
     def __init__(
         self, bids_root, save_root, subjects, sessions,
         tasks, dataset, top_words_map, dataset_id=0, context=64, overlap=32, subject_id_shift=0,
-        tmin=-0.5, tmax=2.5, debug=False,
+        tmin=-0.5, tmax=2.5, debug=False, sentence_aligned=False,
     ):
         super().__init__()
 
@@ -74,6 +74,7 @@ class MEGDataset(torch.utils.data.Dataset):
         self.tmin = tmin
         self.tmax = tmax
         self.dataset = dataset
+        self.sentence_aligned = sentence_aligned
 
         if self.dataset == "libribrain":
             if os.path.exists("./data/libribrain_sensor_xyz.json"):
@@ -140,6 +141,7 @@ class MEGDataset(torch.utils.data.Dataset):
             if dataset == "libribrain":
                 chunks = utils.get_libribrain_word_chunks(
                     bids_root, subject, session, task, run, sfreq, batch_size=self.context, overlap=overlap,
+                    sentence_aligned=self.sentence_aligned,
                 )
             elif "gwilliams2022" in dataset:
                 chunks = utils.get_gwilliams_word_chunks(
@@ -218,9 +220,19 @@ class MEGDataset(torch.utils.data.Dataset):
                 words.append(self.top_words_map[word])
             else:
                 words.append(-1)
+
+        # Get sentence length if available (for sentence-aligned mode)
+        sentence_length = sample.chunk.get("sentence_length", len(words))
+
+        # In sentence-aligned mode, mark words after the sentence as padding (-2)
+        if self.sentence_aligned and sentence_length < len(words):
+            # Mark words beyond sentence boundary as padding
+            for i in range(sentence_length, len(words)):
+                words[i] = -2
+
         words = np.array(words)
 
-        return {
+        result = {
             "meg": meg,
             "words": words,
             "words_raw": sample.chunk["words"],
@@ -228,6 +240,12 @@ class MEGDataset(torch.utils.data.Dataset):
             "sensor_xyz": sensor_xyz,
             "dataset_id": self.dataset_id,
         }
+
+        # Add sentence length for sentence-aligned mode
+        if self.sentence_aligned:
+            result["sentence_length"] = sentence_length
+
+        return result
 
 if __name__ == "__main__":
     dataset = MEGDataset(

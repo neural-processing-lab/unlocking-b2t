@@ -95,6 +95,11 @@ def construct_datasets(dset, aux_dsets, config, args):
 
     print(f"Loading test set for {dset}")
 
+    # Use sentence-aligned mode for test if requested (only for LibriBrain)
+    sentence_aligned_test = getattr(args, 'sentence_aligned_test', False) and dset == "libribrain"
+    if sentence_aligned_test:
+        print("Using sentence-aligned test mode (LibriBrain only)")
+
     datasets["test"] = ds.MEGDataset(
         bids_root=config[dset]["root"],
         save_root=config[dset]["cache"],
@@ -108,6 +113,7 @@ def construct_datasets(dset, aux_dsets, config, args):
         tmin=args.tmin,
         tmax=args.tmax,
         debug=args.debug,
+        sentence_aligned=sentence_aligned_test,
     )
 
     return datasets, dsets, max_channels, all_subjects, word_embeddings, top_words_map, other_words

@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import bert_score
 import jiwer
 import tqdm
+import csv
+import os
+from datetime import datetime
 
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -110,20 +113,20 @@ class WordClassifier(L.LightningModule):
     def _siglip_loss(self, brain_features, word_indices, discard=False):
         """
         SigLIP loss function.
-        
+
         Args:
             embeddings1: First set of embeddings (e.g., brain features)
             embeddings2: Second set of embeddings (e.g., word features)
             temperature: Scaling factor for logits
             bias: Optional bias term
-            
+
         Returns:
             SigLIP loss value
         """
 
-        # Create mask for valid indices
-        valid_mask = word_indices != -1
-        
+        # Create mask for valid indices (filter out-of-vocab: -1, and padding: -2)
+        valid_mask = (word_indices != -1) & (word_indices != -2)
+
         # Filter out invalid entries
         valid_brain_features = brain_features[valid_mask]
         valid_word_indices = word_indices[valid_mask]
@@ -138,9 +141,9 @@ class WordClassifier(L.LightningModule):
     
     def _clip_loss(self, brain_features, word_indices, temperature=0.07):
 
-        # Create mask for valid indices
-        valid_mask = word_indices != -1
-        
+        # Create mask for valid indices (filter out-of-vocab: -1, and padding: -2)
+        valid_mask = (word_indices != -1) & (word_indices != -2)
+
         # Filter out invalid entries
         valid_brain_features = brain_features[valid_mask]
         valid_word_indices = word_indices[valid_mask]
@@ -181,10 +184,10 @@ class WordClassifier(L.LightningModule):
         logits = self(x, subjects, sensor_xyz, dataset_id)
         # loss = self._clip_loss(logits, y)
         loss = self._siglip_loss(logits, y, discard=True)
-        similarities = self._get_prediction(logits)        
+        similarities = self._get_prediction(logits)
 
-        # Mask invalid words
-        valid_mask = y != -1
+        # Mask invalid words (out-of-vocab: -1, padding: -2)
+        valid_mask = (y != -1) & (y != -2)
         valid_y = y[valid_mask]
         valid_similarities = similarities[valid_mask]
 
@@ -200,13 +203,24 @@ class WordClassifier(L.LightningModule):
             true_words = [w[0] for w in batch["words_raw"]]
             true_sent = " ".join(true_words).lower()
 
+            # Get sentence length if available (for sentence-aligned mode)
+            sentence_length = batch.get("sentence_length")
+            if sentence_length is not None:
+                sentence_length = sentence_length.item()
+                # Slice predictions to actual sentence length
+                sentence_preds = full_preds[:sentence_length]
+            else:
+                sentence_preds = full_preds
+                sentence_length = None
+
             # Generate predicted transcript using beam search (get top beam)
             pred_sents = qwen_beam_search(
-                asr_predictions=full_preds,
+                asr_predictions=sentence_preds,
                 vocabulary=[w.lower() for w in self.top_words_map.keys()],
                 beam_width=self.beam_width,
                 num_return_sequences=1,
                 temperature=self.temperature,
+                max_length=sentence_length,
             )
             pred_sent = pred_sents[0].strip()
 
@@ -289,6 +303,7 @@ class WordClassifier(L.LightningModule):
         if self.post_proc:
             results = self.test_step_outputs
             data = []
+            csv_data = []
 
             # Print first example's predictions for inspection
             if results and not self.greedy_only:
@@ -317,13 +332,24 @@ class WordClassifier(L.LightningModule):
 
                     # Format all beam sentences for display
                     beam_display = "\n".join([f"[{i+1}] {s}" for i, s in enumerate(beam_sents)])
+
+                    # Get top beam for CSV (or empty string if no beams)
+                    top_beam = beam_sents[0] if beam_sents else ""
                 else:
                     beam_display = ""
+                    top_beam = ""
 
                 self._log_sentence_metrics(true_sent, greedy_sent, prefix="greedy")
 
                 # Add to table with all beams displayed
                 data.append([true_sent, greedy_sent, beam_display])
+
+                # Add to CSV data (only true, greedy, and top beam)
+                csv_data.append({
+                    "true_sentence": true_sent,
+                    "greedy_prediction": greedy_sent,
+                    "top_beam_prediction": top_beam
+                })
 
             # Create columns list dynamically
             columns = ["true", "greedy", "beams"]
@@ -333,6 +359,19 @@ class WordClassifier(L.LightningModule):
                 columns=columns,
                 data=data
             )
+
+            # Save to CSV file
+            os.makedirs("predictions", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_filename = f"predictions/test_predictions_{timestamp}.csv"
+
+            with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ["true_sentence", "greedy_prediction", "top_beam_prediction"]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(csv_data)
+
+            print(f"\nPredictions saved to {csv_filename}")
 
         return
 
@@ -352,36 +391,52 @@ class WordClassifier(L.LightningModule):
 
         # Also compute top-10 accuracy on the top-50 words only
         top_50_mask = y < 50
-        top_50_preds = preds[top_50_mask]
-        top_50_y = y[top_50_mask]
-        self.topk_top50_test_acc(top_50_preds, top_50_y)
-        self.log(f"{prefix}_top50_top10acc", self.topk_top50_test_acc)
+        if top_50_mask.any():
+            top_50_preds = preds[top_50_mask]
+            top_50_y = y[top_50_mask]
+            self.topk_top50_test_acc(top_50_preds, top_50_y)
+            self.log(f"{prefix}_top50_top10acc", self.topk_top50_test_acc)
 
         # Collect word predictions for confusion matrix and accuracy
-        true_words = [self.top_idx_map[x.item()].lower() for x in full_y if x != -1]
+        # Filter out both out-of-vocab (-1) and padding (-2) tokens
+        true_words = [self.top_idx_map[x.item()].lower() for x in full_y if x.item() >= 0]
         pred_words = [self.top_idx_map[x.item()].lower() for x in preds.argmax(dim=-1)]
         cosine_sim = preds.max(dim=-1).values
 
         if self.post_proc:
-            true = [w[0] for w in batch["words_raw"]]
+            # Get sentence length if available (for sentence-aligned test mode)
+            sentence_length = batch.get("sentence_length")
+            if sentence_length is not None:
+                sentence_length = sentence_length.item()
+                # Only use words up to sentence length
+                true = [w[0] for w in batch["words_raw"][:sentence_length]]
+            else:
+                true = [w[0] for w in batch["words_raw"]]
             true_sent = " ".join(true).lower()
+
+            # Slice predictions to actual sentence length (already got sentence_length above)
+            if sentence_length is not None:
+                sentence_preds = full_preds[:sentence_length]
+            else:
+                sentence_preds = full_preds
 
             if not self.greedy_only:
                 # Get multiple diverse beam sequences
                 beam_sents = qwen_beam_search(
-                    asr_predictions=full_preds,
+                    asr_predictions=sentence_preds,
                     vocabulary=[w.lower() for w in self.top_words_map.keys()],
                     beam_width=self.beam_width,
                     num_return_sequences=self.num_return_sequences,
                     temperature=self.temperature,
+                    max_length=sentence_length,
                 )
                 # Strip whitespace from all returned sequences
                 beam_sents = [s.strip() for s in beam_sents]
             else:
                 beam_sents = []
 
-            # Compute greedy sentence
-            greedy_indices = full_preds.argmax(dim=-1)
+            # Compute greedy sentence (use sentence_preds for sentence-aligned mode)
+            greedy_indices = sentence_preds.argmax(dim=-1)
             greedy_sent = " ".join([
                 self.top_idx_map[x.item()].lower() for x in greedy_indices
             ])

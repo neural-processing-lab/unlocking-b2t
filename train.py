@@ -38,7 +38,9 @@ def cli_main():
     parser.add_argument('--train_scale', type=float, default=1.0)
     parser.add_argument('--save_train_transcripts', action="store_true", default=False)
     parser.add_argument('--save_train_transcripts_name', type=str, default="train_transcripts.csv")
-    
+    parser.add_argument('--sentence_aligned_test', action="store_true", default=False,
+                        help="Use sentence-aligned test sequences (LibriBrain only)")
+
     # Add model specific args
     parser = WordClassifier.add_model_specific_args(parser)
     
